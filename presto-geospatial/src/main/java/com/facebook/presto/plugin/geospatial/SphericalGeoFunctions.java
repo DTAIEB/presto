@@ -21,6 +21,8 @@ import com.esri.core.geometry.MultiPath;
 import com.esri.core.geometry.Point;
 import com.esri.core.geometry.Polygon;
 import com.esri.core.geometry.ogc.OGCGeometry;
+import com.esri.core.geometry.ogc.OGCGeometryCollection;
+import com.esri.core.geometry.ogc.OGCPoint;
 import com.facebook.presto.geospatial.KdbTree;
 import com.facebook.presto.geospatial.Rectangle;
 import com.facebook.presto.geospatial.SphericalGeographyUtils;
@@ -33,24 +35,31 @@ import com.facebook.presto.spi.function.SqlNullable;
 import com.facebook.presto.spi.function.SqlType;
 import com.facebook.presto.spi.type.KdbTreeType;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 
 import java.util.EnumSet;
 
 import static com.facebook.presto.geospatial.GeometryType.LINE_STRING;
 import static com.facebook.presto.geospatial.GeometryType.MULTI_LINE_STRING;
+import static com.facebook.presto.geospatial.GeometryType.MULTI_POINT;
 import static com.facebook.presto.geospatial.GeometryType.MULTI_POLYGON;
+import static com.facebook.presto.geospatial.GeometryType.POINT;
 import static com.facebook.presto.geospatial.GeometryType.POLYGON;
+import static com.facebook.presto.geospatial.GeometryUtils.wktFromJtsGeometry;
 import static com.facebook.presto.geospatial.SphericalGeographyUtils.EARTH_RADIUS_M;
 import static com.facebook.presto.geospatial.SphericalGeographyUtils.checkLatitude;
 import static com.facebook.presto.geospatial.SphericalGeographyUtils.checkLongitude;
 import static com.facebook.presto.geospatial.SphericalGeographyUtils.sphericalDistance;
 import static com.facebook.presto.geospatial.SphericalGeographyUtils.validateSphericalType;
 import static com.facebook.presto.geospatial.serde.EsriGeometrySerde.deserializeEnvelope;
+import static com.facebook.presto.geospatial.serde.JtsGeometrySerde.deserialize;
 import static com.facebook.presto.plugin.geospatial.GeometryType.GEOMETRY_TYPE_NAME;
 import static com.facebook.presto.plugin.geospatial.SphericalGeographyType.SPHERICAL_GEOGRAPHY_TYPE_NAME;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.facebook.presto.spi.type.StandardTypes.DOUBLE;
+import static com.facebook.presto.spi.type.StandardTypes.VARCHAR;
 import static com.google.common.base.Preconditions.checkState;
+import static io.airlift.slice.Slices.utf8Slice;
 import static java.lang.Double.isInfinite;
 import static java.lang.Double.isNaN;
 import static java.lang.Math.PI;
@@ -103,6 +112,17 @@ public final class SphericalGeoFunctions
     {
         // Every SphericalGeography object is a valid geometry object
         return input;
+    }
+
+    @Description("Returns the Well-Known Text (WKT) representation of the geometry")
+    @ScalarFunction("ST_AsText")
+    @SqlType(VARCHAR)
+    public static Slice stSphericalAsText(@SqlType(SPHERICAL_GEOGRAPHY_TYPE_NAME) Slice input)
+    {
+        if (input == null) {
+            return utf8Slice("POINT EMPTY");
+        }
+        return utf8Slice(wktFromJtsGeometry(deserialize(input)));
     }
 
     @SqlNullable
@@ -234,6 +254,55 @@ public final class SphericalGeoFunctions
         }
 
         return sum * 1000;
+    }
+
+    @Description("Returns the Point value that is the mathematical centroid of a Spherical Geography")
+    @ScalarFunction("ST_Centroid")
+    @SqlType(SPHERICAL_GEOGRAPHY_TYPE_NAME)
+    public static Slice stSphericalCentroid(@SqlType(SPHERICAL_GEOGRAPHY_TYPE_NAME) Slice input)
+    {
+        OGCGeometry geometry = EsriGeometrySerde.deserialize(input);
+        if (geometry.isEmpty()) {
+            return Slices.EMPTY_SLICE;
+        }
+        // TODO: add support for other types e.g. POLYGON
+        validateSphericalType("ST_Centroid", geometry, EnumSet.of(POINT, MULTI_POINT));
+        if (geometry instanceof OGCPoint) {
+            return input;
+        }
+
+        OGCGeometryCollection geometryCollection = (OGCGeometryCollection) geometry;
+        for (int i = 0; i < geometryCollection.numGeometries(); i++) {
+            OGCGeometry g = geometryCollection.geometryN(i);
+            validateSphericalType("ST_Centroid", g, EnumSet.of(POINT));
+            Point p = (Point) g.getEsriGeometry();
+            checkLongitude(p.getX());
+            checkLatitude(p.getY());
+        }
+
+        Point centroid;
+        if (geometryCollection.numGeometries() == 1) {
+            centroid = (Point) geometryCollection.geometryN(0).getEsriGeometry();
+        }
+        else {
+            double x3DTotal = 0;
+            double y3DTotal = 0;
+            double z3DTotal = 0;
+
+            for (int i = 0; i < geometryCollection.numGeometries(); i++) {
+                SphericalGeographyUtils.CartesianPoint cp = new SphericalGeographyUtils.CartesianPoint((Point) geometryCollection.geometryN(i).getEsriGeometry());
+                x3DTotal += cp.x;
+                y3DTotal += cp.y;
+                z3DTotal += cp.z;
+            }
+
+            double centroidVectorLength = Math.sqrt(x3DTotal * x3DTotal + y3DTotal * y3DTotal + z3DTotal * z3DTotal);
+            centroid = SphericalGeographyUtils.CartesianPoint.convertToLongLat(
+                    x3DTotal / centroidVectorLength,
+                    y3DTotal / centroidVectorLength,
+                    z3DTotal / centroidVectorLength);
+        }
+        return EsriGeometrySerde.serialize(new OGCPoint(centroid, geometryCollection.getEsriSpatialReference()));
     }
 
     private static double computeSphericalExcess(Polygon polygon, int start, int end)

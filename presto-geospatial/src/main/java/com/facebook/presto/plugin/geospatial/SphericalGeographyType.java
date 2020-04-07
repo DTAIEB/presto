@@ -19,6 +19,7 @@ import com.facebook.presto.spi.block.BlockBuilder;
 import com.facebook.presto.spi.type.AbstractVariableWidthType;
 import com.facebook.presto.spi.type.TypeSignature;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 
 import static com.facebook.presto.geospatial.serde.EsriGeometrySerde.deserialize;
 
@@ -75,6 +76,9 @@ public class SphericalGeographyType
             return null;
         }
         Slice slice = block.getSlice(position, 0, block.getSliceLength(position));
+        if (slice == Slices.EMPTY_SLICE) {
+            return null;
+        }
         return deserialize(slice).asText();
     }
 }
